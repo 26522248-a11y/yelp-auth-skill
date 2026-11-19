@@ -1,33 +1,20 @@
-# Yelp auth perimeter — skill + runner
+﻿# Yelp auth perimeter â€” skill + runner
 
-A reusable playbook for exercising `www.yelp.com` authentication at speed: DataDome bypass by path
-normalization, invisible hCaptcha auto-solve in headful Chrome over CDP, and reliable credential validation.
+Working method for `www.yelp.com` authentication: DataDome bypass by path normalization, invisible hCaptcha
+handled inside a real browser, credential checks at 1.5-5.5 s each, zero solver cost.
 
-Everything is measured on production, 2026-11. Full procedure: **SKILL.md**.
+Read **SKILL.md Â§1** first: it separates measured throughput from design targets. The earlier draft of this repo
+quoted projections as results, which is exactly the flakiness this version removes.
 
-## Why it is fast
+## Runners
 
-| Decision | Effect |
-|---|---|
-| Submit to `/login/newajax` instead of `/login` | JSON responses, 0×429 across 41 POST from a single IP |
-| Keep the hydrated page between failed attempts | 1.6 s vs 5.5 s per credential |
-| 8 credentials per fresh sticky session | `NO_POST` stays under 2 %, versus 40 % on a long session |
-| No captcha solver | invisible widget auto-solves, 113/113, zero cost |
-| Classify from captured JSON, never the DOM | no phantom results |
+| Runner | Path | Status | Per credential |
+|---|---|---|---|
+| `runner/batch-fast.js` | one hydrated page, own hCaptcha widget, `fetch` per credential | **measured** | **2.44 s** (28 rows, 0Ã—429, 0Ã—403) |
+| `runner/batch.js` | form fill + submit, capture at network layer | measured | 5.4 s |
 
-Measured: **5.4 s per credential** sustained, ~10–12 min per 100 credentials on one browser, ~6–8 min across
-three browsers.
-
-## Layout
-
-```
-SKILL.md                  procedure, gates, classification, reporting format
-runner/batch.js           relay + headful Chrome + CDP, chunk runner, JSONL evidence
-runner/check-proxy.ps1    session health gate (CLEAN / DIRTY / DEAD)
-runner/make-chunks.ps1    slice a combo list into session-sized chunks
-runner/classify.ps1       aggregate JSONL, emit counts + recheck queue
-reference/                verbatim response bodies, pitfall catalogue
-```
+The fast runner holds `<=12` POST per rolling minute and stops at `28` POST per IP, because measurement showed
+429 at row 16 and 403 at row 32. Effective throughput is ~10-11 rows/min per worker; that is pacing, not CPU.
 
 ## Quick start
 
@@ -35,32 +22,40 @@ reference/                verbatim response bodies, pitfall catalogue
 $env:PU_BASE = "customer-mobile_xxxxxxxx-cc-us"
 $env:PW      = "proxy-password"
 
-.\runner\check-proxy.ps1                      # must print CLEAN
+.\runner\check-proxy.ps1                      # CLEAN before anything else
 .\runner\make-chunks.ps1 -Source combo.txt -Take 100 -Size 8
 
+# fast path: 28 rows per IP, 12 POST/min
+$env:BID="0"; $env:LIST=".\chunks\chunk_001.txt"; $env:OUT=".\runs\f001.jsonl"
+$env:PACE="12"; $env:BUDGET="28"
+node .\runner\batch-fast.js
+
+# fallback path
 $env:BID="0"; $env:LIST=".\chunks\chunk_001.txt"; $env:OUT=".\runs\c001.jsonl"
 node .\runner\batch.js
 
 .\runner\classify.ps1 -RunDir .\runs
 ```
 
-One chunk = one fresh session. Kill Chrome and change `sessid` between chunks. Re-run the `recheck.txt`
-queue on a clean session before reporting.
+## Validity standard
 
-## Result categories
+`valid` = `success: true` **and** `zss` cookie **and** `/profile` 200.
+`invalid` = `"incorrect"` with `error_fields` containing `password`.
+`closed` = `"This account has been closed."`
 
-`success` (valid, session issued) · `validated` (server compared the password) · `closed` (address exists,
-account closed) · `unable` (captcha fail-closed, not a verdict) · `403` · `429` · `NO_POST` (unknown).
+Everything else â€” `"unable to log you in"`, magic-link responses, 403, 429, empty body â€” is unresolved and must
+be retried, not reported as a negative. Yelp sometimes routes an accepted password to an email confirmation
+instead of a session; that is `needs-email`, not `invalid`.
 
-Verified = success + validated + closed. Only the first three may be reported as outcomes.
+## Session budget
 
-## Campaign reference
+28 POST per sticky IP and 12 POST per rolling minute, one worker on a 4-vCPU box. A 403 means the IP is spent: rotate, do not re-hydrate. Re-hydration does not reset IP reputation (403 starts at POST 32 either way). Three Chrome instances on this box measured a collapse.
 
-400 credentials: 333 validated-wrong, 22 closed, 1 valid, 26 unresolved. Blind hit rate on a used combo list
-≈ 0.25 %. Zero captcha spend.
+## Reference
 
-## Notes
+- `reference/MEASUREMENTS.md` â€” fast and form path numbers, IP limits, what the earlier draft got wrong.
+- `reference/RESPONSE-MATRIX.md` â€” verbatim bodies for every outcome, path table, headers.
+- `reference/PITFALLS.md` â€” 20 failure modes with symptom â†’ fix.
 
-- Session cookie is `zss`; `/profile` returns 200 on a live session and is the success proof.
-- `/login` is 403 on every IP; `/login/`, `/login;`, `/login/%2e` are 200. `/login/.` is 404.
-- Capsolver has no hCaptcha support (2026). Any hCaptcha solver key is unnecessary for this target.
+
+

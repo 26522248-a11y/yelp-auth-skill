@@ -92,3 +92,41 @@ Fix: no solver. The invisible widget solves itself in headful Chrome with
 
 Symptom: "missing HSTS/CSP" that a triager can disprove in one request.
 Fix: inspect headers on `/login/` (envoy), not on the DataDome 403.
+
+## P16 - Treating "incorrect" as a definitive wrong password
+
+Symptom: a run reports clean negatives, then the same pair returns equire_link / "sent an email with a login
+link" on another session.
+Cause: Yelp routes some accepted credentials into an email-confirmation flow instead of issuing a session, and
+the fail-closed body uses the same "incorrect" wording.
+Fix: bucket equire_link / magic_link / "login link" as 
+eeds-email, not invalid. Only success: true
+plus a zss cookie plus /profile 200 is alid. Keep the two negative buckets separate:
+password-rejected vs confirmation-required.
+
+## P17 - Quoting design targets as measurements
+
+Symptom: a report claims 1.5 s/credential on a runner that was never benchmarked end to end; the next run
+produces 12 s and the whole finding looks inflated.
+Fix: the fast runner has an acceptance gate (SKILL.md section 7). Until it passes, publish form-path numbers only.
+
+## P18 - Wrong hCaptcha field name
+
+Symptom: every fast-path POST returns "We're unable to log you in right now." with a token of ~1900 chars that
+was minted a second earlier. Looks like the token is rejected.
+Cause: the endpoint expects hcaptcha_response (underscore). h-captcha-response and
+g-recaptcha-response are ignored, so the request is treated as tokenless and fail-closes.
+Fix: send csrftok, email, password, hcaptcha_response - exactly those four. Confirm once by hooking
+XMLHttpRequest on a real form submit and printing the body's field names.
+
+## P19 - Assuming /login/newajax has no rate limit
+
+Symptom: 429 from row ~16 in a fast run, after a previous run did 41 POST with none.
+Cause: the limit is per rolling minute, not per session. Spaced requests hide it; a 2 s/row burst exposes it.
+Fix: hold <=12 POST/min (paceDelay in batch-fast.js) and stop at 28 POST per IP.
+
+## P20 - Running several Chrome instances on a small box
+
+Symptom: three workers finish 15 rows in 291 s with 9x403 and 6 unresolved; single-worker does 28 rows in 155 s.
+Cause: hydration and hCaptcha contention, plus all workers competing for the same proxy pool.
+Fix: one worker. Scale with clean IPs and sequential 28-row chunks, not parallel browsers.

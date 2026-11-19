@@ -9,7 +9,7 @@ param(
 # Precedence is intentional: a later better verdict overwrites an earlier weak one.
 # Output: counts, one raw sample per category, and a recheck queue for unresolved rows.
 
-$priority = @{ success = 9; validated = 8; closed = 7; unable = 6; other = 5; '429' = 4; '403' = 3; 'NO_POST' = 0 }
+$priority = @{ success = 9; validated = 8; closed = 7; link = 6; unable = 5; other = 4; '429' = 3; '403' = 2; 'NO_POST' = 0 }
 $map = @{}
 
 foreach ($f in (Get-ChildItem $RunDir -Filter *.jsonl -ErrorAction SilentlyContinue)) {
@@ -17,10 +17,14 @@ foreach ($f in (Get-ChildItem $RunDir -Filter *.jsonl -ErrorAction SilentlyConti
     try { $o = $_ | ConvertFrom-Json } catch { return }
     if (-not $o.email) { return }
     $b = [string]$o.body
+    # success without zss is not a hit; treat as no-session and keep it out of the valid bucket
+    $withSession = ($o.success -eq $true) -and ($o.zss -ne $null) -and (@($o.zss).Count -gt 0 -or $o.profileStatus -eq 200)
     $cat =
-      if ($o.success) { 'success' }
+      if ($withSession) { 'success' }
+      elseif ($o.success -eq $true) { 'nosession' }
       elseif ($o.validated -or $b -like '*or password you ent*') { 'validated' }
       elseif ($b -like '*has been closed*') { 'closed' }
+      elseif ($b -like '*require_link*' -or $b -like '*magic_link*' -or $b -like '*login link*') { 'link' }
       elseif ($o.unable -or $b -like '*unable to log you in*') { 'unable' }
       elseif ($o.status -eq 403) { '403' }
       elseif ($o.status -eq 429 -or $b -like '*Too Many Requests*') { '429' }
