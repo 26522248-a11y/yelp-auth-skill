@@ -1,4 +1,4 @@
-const http = require('http');
+﻿const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -58,6 +58,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function j(u, n) { for (let i = 0; i < n; i++) { try { const r = await fetch(u); return await r.json(); } catch (e) { await sleep(400); } } return null; }
 const rec = o => { fs.appendFileSync(OUT, JSON.stringify(o) + '\n'); console.log(JSON.stringify(o)); };
 const t0 = Date.now();
+// Disk guard: a full temp volume makes Chrome silently stall (ENOSPC), which looks like
+// DataDome/hydration failure and destroys throughput. 2 GB is the floor.
+(function(){
+  try {
+    var st = fs.statfsSync(os.tmpdir());
+    var freeGB = st.bavail * st.bsize / 1e9;
+    if (freeGB < 2) { rec({ event: 'abort', why: 'disk', freeGB: Math.round(freeGB*10)/10 }); process.exit(2); }
+  } catch (e) {}
+})();
 const postTimes = [];   // ms timestamps of every POST sent from this IP
 let paceSleepMs = 0;
 
@@ -268,6 +277,8 @@ function paceDelay() {
 
   try { ws.close(); } catch (e) {}
   try { chrome.kill(); } catch (e) {}
+  try { fs.rmSync(udd, { recursive: true, force: true }); } catch (e) {}
   try { relay.close(); } catch (e) {}
   setTimeout(() => process.exit(0), 800);
 })();
+

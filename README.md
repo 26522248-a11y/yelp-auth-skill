@@ -1,61 +1,64 @@
-﻿# Yelp auth perimeter â€” skill + runner
+﻿# Yelp auth perimeter - skill + runner
 
 Working method for `www.yelp.com` authentication: DataDome bypass by path normalization, invisible hCaptcha
-handled inside a real browser, credential checks at 1.5-5.5 s each, zero solver cost.
+inside a real browser, credential checks at 2-3 s each, zero solver cost.
 
-Read **SKILL.md Â§1** first: it separates measured throughput from design targets. The earlier draft of this repo
-quoted projections as results, which is exactly the flakiness this version removes.
+Read **SKILL.md section 1** first: every number there was measured. Earlier drafts of this repo quoted
+projections as results; those are corrected in `reference/MEASUREMENTS.md`.
 
 ## Runners
 
 | Runner | Path | Status | Per credential |
 |---|---|---|---|
-| `runner/batch-fast.js` | one hydrated page, own hCaptcha widget, `fetch` per credential | **measured** | **2.44 s** (28 rows, 0Ã—429, 0Ã—403) |
-| `runner/batch.js` | form fill + submit, capture at network layer | measured | 5.4 s |
-
-The fast runner holds `<=12` POST per rolling minute and stops at `28` POST per IP, because measurement showed
-429 at row 16 and 403 at row 32. Effective throughput is ~10-11 rows/min per worker; that is pacing, not CPU.
+| `runner/pool.ps1` | orchestrator: 2 workers, 15-row chunks, IP rotation by relaunch | **stable** | 2.0-3.1 s, 11-20 rows/min (best observed 30) |
+| `runner/batch-fast.js` | one worker, in-page token + fetch, pacing/budget guards | **stable** | 2.44 s |
+| `runner/batch.js` | form fill + submit | fallback | 5.4 s |
+| `runner/batch-pool.js` | in-browser IP rotation | **broken, do not use** | tunnel teardown kills Chrome's network service |
 
 ## Quick start
 
 ```powershell
-$env:PU_BASE = "customer-mobile_xxxxxxxx-cc-us"
-$env:PW      = "proxy-password"
+# one "user:pass" proxy account per line
+.\runner\pool.ps1 -Source combo.txt -PoolFile proxies.txt -Skip 0 -Take 150 -Chunk 15 -Workers 2
+```
 
-.\runner\check-proxy.ps1                      # CLEAN before anything else
-.\runner\make-chunks.ps1 -Source combo.txt -Take 100 -Size 8
+The orchestrator prints a line per wave and an aggregate: rows, validated, success, closed, 403, 429, wall,
+rows/min. It resumes by offset, never restarts at zero.
 
-# fast path: 28 rows per IP, 12 POST/min
+Single-chunk runs:
+
+```powershell
+$env:PU_BASE="customer-mobile_xxxx-cc-us"; $env:PW="..."
 $env:BID="0"; $env:LIST=".\chunks\chunk_001.txt"; $env:OUT=".\runs\f001.jsonl"
-$env:PACE="12"; $env:BUDGET="28"
+$env:PACE="12"; $env:BUDGET="15"
 node .\runner\batch-fast.js
-
-# fallback path
-$env:BID="0"; $env:LIST=".\chunks\chunk_001.txt"; $env:OUT=".\runs\c001.jsonl"
-node .\runner\batch.js
-
-.\runner\classify.ps1 -RunDir .\runs
 ```
 
 ## Validity standard
 
-`valid` = `success: true` **and** `zss` cookie **and** `/profile` 200.
+`valid` = `success: true` and `zss` cookie and `/profile` 200.
 `invalid` = `"incorrect"` with `error_fields` containing `password`.
 `closed` = `"This account has been closed."`
 
-Everything else â€” `"unable to log you in"`, magic-link responses, 403, 429, empty body â€” is unresolved and must
-be retried, not reported as a negative. Yelp sometimes routes an accepted password to an email confirmation
-instead of a session; that is `needs-email`, not `invalid`.
+Everything else - `"unable to log you in"`, magic-link responses, 403, 429, empty body - is unresolved and must
+be retried, not reported as a negative.
 
 ## Session budget
 
-28 POST per sticky IP and 12 POST per rolling minute, one worker on a 4-vCPU box. A 403 means the IP is spent: rotate, do not re-hydrate. Re-hydration does not reset IP reputation (403 starts at POST 32 either way). Three Chrome instances on this box measured a collapse.
+15 POST per sticky IP, 2 workers on a 4 GB box, 2 GB free disk floor. A 403 means the IP is spent: rotate,
+do not re-hydrate (403 starts at POST 32 either way). 3 workers measured a collapse.
 
-## Reference
+## Files
 
-- `reference/MEASUREMENTS.md` â€” fast and form path numbers, IP limits, what the earlier draft got wrong.
-- `reference/RESPONSE-MATRIX.md` â€” verbatim bodies for every outcome, path table, headers.
-- `reference/PITFALLS.md` â€” 20 failure modes with symptom â†’ fix.
-
+- `SKILL.md` - procedure, gates, classification, throughput table.
+- `runner/pool.ps1` - the stable mass runner.
+- `runner/batch-fast.js` - single worker.
+- `runner/batch.js` - form fallback.
+- `runner/check-proxy.ps1` - session health gate.
+- `runner/make-chunks.ps1` - chunk a list.
+- `runner/classify.ps1` - aggregate JSONL, emit counts and re-check queue.
+- `reference/MEASUREMENTS.md` - measured runs, IP limits, corrections.
+- `reference/RESPONSE-MATRIX.md` - verbatim bodies.
+- `reference/PITFALLS.md` - 20 failure modes.
 
 

