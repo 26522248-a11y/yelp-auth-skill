@@ -21,16 +21,17 @@ foreach ($a in $targets) {
   $ip = "?"
   try { $ip = ($ipJson | ConvertFrom-Json).ip } catch {}
 
-  $state = if ($code -eq "200") { "CLEAN" } elseif ($code -eq "403") { "DIRTY" } else { "DEAD" }
+  $state = if ($code -eq "200") { "CLEAN" } elseif ($code -eq "403") { "DIRTY" } elseif ($code -eq "407") { "QUOTA" } else { "DEAD" }
   $results += [pscustomobject]@{ account = $u; ip = $ip; login = $code; state = $state }
   Write-Output ("{0,-42} {1,-11} login={2} {3}" -f $u, $ip, $code, $state)
 }
 
 $bad = @($results | Where-Object { $_.state -ne "CLEAN" })
 Write-Output ""
-Write-Output ("clean={0} dirty={1} dead={2}" -f @($results | Where-Object { $_.state -eq "CLEAN" }).Count, @($results | Where-Object { $_.state -eq "DIRTY" }).Count, @($results | Where-Object { $_.state -eq "DEAD" }).Count)
+Write-Output ("clean={0} dirty={1} quota={2} dead={3}" -f @($results | Where-Object { $_.state -eq "CLEAN" }).Count, @($results | Where-Object { $_.state -eq "DIRTY" }).Count, @($results | Where-Object { $_.state -eq "QUOTA" }).Count, @($results | Where-Object { $_.state -eq "DEAD" }).Count)
 if ($bad.Count -gt 0) {
-  Write-Output "DIRTY/DEAD accounts: rotate or wait. A 403 on a fresh session means the IP pool is burned."
+  Write-Output "DIRTY = DataDome on a fresh IP; QUOTA = 407 traffic limit on the Oxylabs account; DEAD = 000/timeout/auth."
+  Write-Output "Rotate DIRTY, top up QUOTA, drop DEAD. A 403 on a fresh session means the IP pool is burned."
   exit 1
 }
 exit 0

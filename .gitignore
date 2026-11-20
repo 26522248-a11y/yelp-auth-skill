@@ -1,13 +1,15 @@
 runs/
 chunks/
 *.jsonl
-!reference/*.jsonl
-classification.txt
-recheck.txt
+!examples/*.jsonl
+*.csv
+hits.txt
+state.txt
+missed.txt
+proxies.txt
 node_modules/
 
 # Golden Chrome profile: machine-specific, big, copied to the other box by hand.
 profiles/base/
 profiles/*.zip
-# Keep the reference identity.
 !profiles/identity.json

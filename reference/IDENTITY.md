@@ -109,4 +109,4 @@ node -e "console.log(require('./runner/identity').diff('profiles/identity.json',
 ```
 
 Zero rows = the browser is the same. If rows remain, the widget difference is not identity and the
-next stop is `reference/INCIDENTS.md` plus the submit path.
+next stop is the failure playbook in `SKILL.md` plus the submit path.
