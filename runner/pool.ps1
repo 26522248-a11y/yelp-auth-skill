@@ -6,7 +6,10 @@ param(
   [int]$Chunk = 15,          # POST per IP before rotation; 15 keeps under the 429 window
   [int]$Workers = 2,         # 2 measured stable on 4 vCPU; 3 collapses
   [int]$Pace = 14,
-  [string]$OutDir = ".\runs"
+  [string]$OutDir = ".\runs",
+  [string]$Identity = "",
+  [string]$ProfileTemplate = "",
+  [switch]$AllowOwn
 )
 
 # Runs a slice of a combo list across the proxy pool, two workers at a time.
@@ -16,6 +19,14 @@ param(
 $ErrorActionPreference = "Stop"
 $runner = Join-Path $PSScriptRoot "batch-fast.js"
 if (-not (Test-Path $runner)) { throw "runner not found: $runner" }
+
+# Chrome build must match the reference identity; UA-CH, locale and timezone are pinned at
+# CDP level so a different Windows locale is a warning, not a stop.
+$idPath = if ($Identity) { $Identity } else { Join-Path $PSScriptRoot "..\profiles\identity.json" }
+if (Test-Path $idPath) {
+  & node (Join-Path $PSScriptRoot "identity.js") verify $idPath | Write-Output
+  if ($LASTEXITCODE -ne 0) { throw "Chrome build differs from $idPath - install the reference build first" }
+}
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $pool = Get-Content $PoolFile | Where-Object { $_ -match ':' -and $_.Trim() -ne '' } | ForEach-Object {
@@ -48,6 +59,9 @@ for ($c = 0; $c -lt $chunks.Count; $c += $Workers) {
     $out = Join-Path $OutDir ("w{0}-{1}.jsonl" -f $wave, $w)
     $env:BID = "$w"; $env:LIST = $chunks[$c + $w]; $env:OUT = $out
     $env:PU_BASE = $acc.user; $env:PW = $acc.pass; $env:PACE = "$Pace"; $env:BUDGET = "$Chunk"
+    if ($Identity) { $env:IDENTITY = $Identity } else { Remove-Item Env:\IDENTITY -ErrorAction SilentlyContinue }
+    if ($ProfileTemplate) { $env:PROFILE_TEMPLATE = $ProfileTemplate } else { Remove-Item Env:\PROFILE_TEMPLATE -ErrorAction SilentlyContinue }
+    if ($AllowOwn) { $env:ALLOW_OWN = "1" } else { Remove-Item Env:\ALLOW_OWN -ErrorAction SilentlyContinue }
     $procs += Start-Process -FilePath "node" -ArgumentList "`"$runner`"" -WindowStyle Hidden -PassThru
     $batch += $out
     Start-Sleep -Seconds 2

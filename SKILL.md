@@ -73,7 +73,7 @@ One hydrated page per IP, token minted in-page, one `fetch` per credential.
 
 ```
 hydrate /login/            # #ajax-login + window.hcaptcha + outerHTML > 400000
-arm widget                 # hcaptcha.render(div, {sitekey, size:'invisible'})
+arm widget                 # site widget if [data-hcaptcha-widget-id] exists, else own render
 loop 15 times:
   token = hcaptcha.execute(widget)        # 0.8-2.0 s, invisible, no user gesture
   fetch('/login/newajax', {csrftok, email, password, hcaptcha_response: token})
@@ -81,7 +81,13 @@ loop 15 times:
 then: kill Chrome, delete profile, new proxy session
 ```
 
-Two details decide whether this works at all:
+The widget is created by Yelp's own JS at runtime, never server-rendered (0 occurrences in 23 saved
+pages, including a 983 KB hydrated one). If it is absent, a self-rendered widget has no site `rqdata`
+and the server answers with a magic link instead of a password verdict. Which variant you get is
+decided by the browser fingerprint, so the runner pins it from `profiles/identity.json` and aborts on
+`own:*` unless `ALLOW_OWN=1`. Details and the cross-machine procedure: `reference/IDENTITY.md`.
+
+Three details decide whether this works at all:
 
 1. Field name is `hcaptcha_response` (underscore). The form sends exactly `csrftok`, `email`, `password`,
    `hcaptcha_response`. Sending `h-captcha-response` makes the server answer `"We're unable to log you in right
@@ -89,6 +95,10 @@ Two details decide whether this works at all:
 2. Token is not IP-bound, but a POST from a different IP than the one that minted it is routed to the
    magic-link flow. Measured: token minted on IP-A, POST on IP-B returned `"We had some trouble sending a login
    link"` instead of a password verdict. Mint and submit on the same IP.
+
+3. If `armWidget()` returns `own:<id>`, the token has no site `rqdata`. Stop the chunk, check identity
+   (`runner\identity.ps1 -Mode verify` and `-Mode selftest`), and only run with `ALLOW_OWN=1` when you
+   accept magic-link answers.
 
 ## 5. Session budget
 

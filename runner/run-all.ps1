@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory=$true)][string]$Source,
   [Parameter(Mandatory=$true)][string]$PoolFile,
   [int]$StartAt = 0,
@@ -6,7 +6,10 @@ param(
   [int]$Chunk = 15,
   [int]$Workers = 2,
   [int]$Pace = 14,
-  [string]$Root = ".\runs"
+  [string]$Root = ".\runs",
+  [string]$Identity = "",
+  [string]$ProfileTemplate = "",
+  [switch]$AllowOwn
 )
 
 # Runs the remaining list in resumable batches.
@@ -42,23 +45,24 @@ while ($offset -lt $total) {
   $outDir = Join-Path $Root ("batch_{0:d5}" -f $offset)
   $window = $allLines | Select-Object -Skip $offset -First $Take
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  $log = & $poolScript -Source $Source -PoolFile $PoolFile -Skip $offset -Take $Take -Chunk $Chunk -Workers $Workers -Pace $Pace -OutDir $outDir 2>&1
+  $log = & $poolScript -Source $Source -PoolFile $PoolFile -Skip $offset -Take $Take -Chunk $Chunk -Workers $Workers -Pace $Pace -OutDir $outDir -Identity $Identity -ProfileTemplate $ProfileTemplate -AllowOwn:$AllowOwn 2>&1
   $sw.Stop()
   Write-Output (($log | Select-Object -Last 2) -join " | ")
 
-  $rows = 0; $val = 0; $suc = 0; $closed = 0; $r403 = 0; $r429 = 0
+  $rows = 0; $val = 0; $suc = 0; $closed = 0; $link = 0; $r403 = 0; $r429 = 0
   foreach ($line in ($log | Where-Object { $_ -like "TOTAL*" })) {
     if ($line -match 'rows=(\d+)') { $rows = [int]$matches[1] }
     if ($line -match 'validated=(\d+)') { $val = [int]$matches[1] }
     if ($line -match 'success=(\d+)') { $suc = [int]$matches[1] }
     if ($line -match 'closed=(\d+)') { $closed = [int]$matches[1] }
+    if ($line -match 'link=(\d+)') { $link = [int]$matches[1] }
     if ($line -match '403=(\d+)') { $r403 = [int]$matches[1] }
     if ($line -match '429=(\d+)') { $r429 = [int]$matches[1] }
   }
   $el = [math]::Round($sw.Elapsed.TotalSeconds)
   [pscustomobject]@{
     offset = $offset; rows = $rows; validated = $val; success = $suc; closed = $closed
-    r403 = $r403; r429 = $r429; secs = $el
+    link = $link; r403 = $r403; r429 = $r429; secs = $el
     rowsPerMin = if ($el -gt 0) { [math]::Round(60.0 * $rows / $el, 1) } else { 0 }
     time = (Get-Date).ToString("s")
   } | ConvertTo-Json -Compress | Add-Content -Path $progress -Encoding UTF8
@@ -78,6 +82,14 @@ while ($offset -lt $total) {
       Add-Content -Path $missedFile -Value $missed -Encoding ascii
       Write-Output ("missed {0} rows -> queue" -f $missed.Count)
     }
+  }
+
+  $degraded = ($rows -gt 0 -and $link -ge [math]::Ceiling($rows * 0.8))
+  if ($degraded) {
+    Write-Output ("FLOW-DEGRADED link={0}/{1} - offset stays {2}" -f $link, $rows, $offset)
+    Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    break
   }
 
   $offset += $Take

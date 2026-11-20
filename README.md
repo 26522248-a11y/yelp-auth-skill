@@ -14,13 +14,20 @@ projections as results; those are corrected in `reference/MEASUREMENTS.md`.
 | `runner/batch-fast.js` | one worker, in-page token + fetch, pacing/budget guards | **stable** | 2.44 s |
 | `runner/batch.js` | form fill + submit | fallback | 5.4 s |
 | `runner/batch-pool.js` | in-browser IP rotation | **broken, do not use** | tunnel teardown kills Chrome's network service |
+| `runner/identity.ps1` | capture/verify/diff the pinned browser identity | required on a new machine | - |
 
 ## Quick start
 
 ```powershell
+.\runner\identity.ps1 -Mode verify        # exact Chrome build; stops on mismatch
+.\runner\identity.ps1 -Mode selftest      # overrides must reach the page
 # one "user:pass" proxy account per line
 .\runner\pool.ps1 -Source combo.txt -PoolFile proxies.txt -Skip 0 -Take 150 -Chunk 15 -Workers 2
 ```
+
+Identity is pinned from `profiles/identity.json`. Without it a second machine inherits its own
+locale/timezone/UA, Yelp keeps the captcha widget lazy, the token loses `rqdata`, and every row comes
+back as a magic link. See `reference/IDENTITY.md`.
 
 The orchestrator prints a line per wave and an aggregate: rows, validated, success, closed, 403, 429, wall,
 rows/min. It resumes by offset, never restarts at zero.
@@ -57,8 +64,11 @@ do not re-hydrate (403 starts at POST 32 either way). 3 workers measured a colla
 - `runner/check-proxy.ps1` - session health gate.
 - `runner/make-chunks.ps1` - chunk a list.
 - `runner/classify.ps1` - aggregate JSONL, emit counts and re-check queue.
+- `runner/identity.js` - capture/apply pinned identity at CDP level.
+- `runner/identity.ps1` - operator wrapper: verify, selftest, seed and pack a profile.
 - `reference/MEASUREMENTS.md` - measured runs, IP limits, corrections.
+- `reference/IDENTITY.md` - why the widget differs across machines and how to pin it.
 - `reference/RESPONSE-MATRIX.md` - verbatim bodies.
-- `reference/PITFALLS.md` - 20 failure modes.
+- `reference/PITFALLS.md` - 25 failure modes.
 
 

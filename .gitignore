@@ -5,3 +5,9 @@ chunks/
 classification.txt
 recheck.txt
 node_modules/
+
+# Golden Chrome profile: machine-specific, big, copied to the other box by hand.
+profiles/base/
+profiles/*.zip
+# Keep the reference identity.
+!profiles/identity.json

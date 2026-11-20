@@ -130,3 +130,33 @@ instead of a password verdict.
 Cause: token minted on IP-A and submitted from IP-B. The token itself is accepted, but the flow switches to
 email confirmation.
 Fix: mint and submit on the same IP. Rotate between chunks, not inside a chunk.
+
+## P22 - Looking for the widget in server HTML
+
+Symptom: 23 saved login pages (6-983 KB, hydrated) have `data-hcaptcha-widget-id` = 0 and `rqdata` = 0,
+while a running browser sometimes has the widget.
+Cause: Yelp's own JS creates the widget div at runtime. It is never server-rendered.
+Fix: judge widget presence only from a live DOM after hydration; never from HTML dumps or from the
+initial payload. See `reference/IDENTITY.md`.
+
+## P23 - Letting the machine define the browser identity
+
+Symptom: the same runner and the same list get `validated` on one box and `link` on another.
+Cause: the runner set only `--lang` and `--window-size`; UA, UA-CH, `Accept-Language`, timezone,
+locale, cores, memory and GL strings came from the OS. Yelp's JS stays lazy on the second fingerprint,
+the runner self-renders, the token has no site `rqdata`, and the server answers with a magic link.
+Fix: pin `profiles/identity.json` and verify Chrome build + selftest before a run.
+
+## P24 - Aborting the chunk is right, finishing it is optional
+
+Symptom: a chunk of 15 spends 15 POSTs on `link` and yields 0 hits.
+Cause: the runner carried on after `armWidget()` returned `own:<id>`.
+Fix: `batch-fast.js` aborts on `own:*` with `why=own-widget`, keeping offset and IP. `ALLOW_OWN=1`
+overrides when the operator wants coverage anyway.
+
+## P25 - Copying a Chrome profile without clearing locks
+
+Symptom: Chrome on the copy opens a blank window or exits immediately; CDP never becomes ready.
+Cause: `SingletonLock`, `SingletonCookie`, `SingletonSocket` and `Default/LOCK` still point at the source
+machine.
+Fix: remove those four from the copy before launch; `batch-fast.js` does it for `PROFILE_TEMPLATE`.
